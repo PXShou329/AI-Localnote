@@ -171,12 +171,12 @@ class NoteService:
             # LLM enrichment ran: its summary (and tags, unless explicit ones
             # were supplied) replace the stored ones.
             summary = result.summary or None
-            new_tags: Sequence[str] = tags if tags is not None else result.tags
+            new_tags: tuple[str, ...] = tuple(tags) if tags is not None else tuple(result.tags)
         else:
             # No enrichment (e.g. --no-llm): body changes only; summary and
             # stored tags are preserved unless tags were explicitly given.
             summary = note.summary
-            new_tags = note.tags if tags is None else tags
+            new_tags = note.tags if tags is None else tuple(tags)
 
         updated = Note(
             title=new_title,
