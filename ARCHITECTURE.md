@@ -38,4 +38,9 @@ CLI (typer)  ->  Service  ->  Repository  ->  sqlite3
   exceptions.
 - Tests live in `tests/`, use only temp paths (`tmp_db_path` fixture in
   `conftest.py`); nothing writes to the real home directory.
-- Quality gates: `ruff check src tests` and `mypy src` (strict) must be green.
+- Quality gates:
+  - `pytest tests/ -q`
+  - `ruff check src tests`
+  - `mypy src` (strict; tests are intentionally out of mypy scope)
+  All three must be green. `mypy src tests` is informational only and is
+  not a release/blocking gate (see STATUS.md → Technical debt).
