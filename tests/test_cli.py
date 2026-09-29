@@ -1,15 +1,25 @@
-"""CLI integration tests using an injected FakeLLM (no network, M1 + M2 summary/tags)."""
+"""CLI integration tests using an injected FakeLLM (no network, M1 + M2 summary/tags).
+
+M5 note commands (``add``/``list``/``show``/``edit``/``delete``) are exercised
+against an in-memory ``FakeNoteRepository`` injected through ``build_app`` —
+no SQLite database and no real Ollama calls.
+"""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from localnote import __version__
 from localnote.cli import app, build_app
+from localnote.exceptions import NoteNotFoundError, PersistenceError
+from localnote.models import Note
 
 runner = CliRunner()
+
+NOW = datetime(2026, 9, 25, 10, 0, 0, tzinfo=timezone.utc)
 
 
 class FakeLLM:
@@ -26,6 +36,71 @@ class FakeLLM:
         if not self.responses:
             raise AssertionError("FakeLLM received more calls than scripted responses")
         return self.responses.pop(0)
+
+
+class FakeNoteRepository:
+    """In-memory double of the NoteRepository protocol for CLI-level tests."""
+
+    def __init__(self) -> None:
+        self._notes: dict[int, Note] = {}
+        self._next_id = 1
+        self.calls: list[str] = []
+        self.fail_save_with: Exception | None = None
+        self.fail_update_with: Exception | None = None
+
+    def save(self, note: Note) -> Note:
+        self.calls.append("save")
+        if self.fail_save_with is not None:
+            raise self.fail_save_with
+        if note.id is not None:
+            raise PersistenceError("Refusing to save a note that already has an id")
+        stored = Note(
+            title=note.title,
+            body=note.body,
+            summary=note.summary,
+            tags=note.tags,
+            created_at=note.created_at,
+            updated_at=note.updated_at,
+            id=self._next_id,
+        )
+        self._notes[self._next_id] = stored
+        self._next_id += 1
+        return stored
+
+    def update(self, note: Note) -> Note:
+        self.calls.append("update")
+        if self.fail_update_with is not None:
+            raise self.fail_update_with
+        if note.id is None:
+            raise PersistenceError("Cannot update a note without an id")
+        if note.id not in self._notes:
+            raise NoteNotFoundError(note.id)
+        self._notes[note.id] = note
+        return note
+
+    def get(self, note_id: int) -> Note:
+        self.calls.append("get")
+        try:
+            return self._notes[note_id]
+        except KeyError:
+            raise NoteNotFoundError(note_id) from None
+
+    def list_all(self) -> tuple[Note, ...]:
+        self.calls.append("list_all")
+        return tuple(self._notes[key] for key in sorted(self._notes, reverse=True))
+
+    def delete(self, note_id: int) -> None:
+        self.calls.append("delete")
+        if note_id not in self._notes:
+            raise NoteNotFoundError(note_id)
+        del self._notes[note_id]
+
+    def count(self) -> int:
+        return len(self._notes)
+
+
+def _fake() -> FakeNoteRepository:
+    return FakeNoteRepository()
 
 
 def test_module_app_help_lists_summarize() -> None:
@@ -101,3 +176,310 @@ def test_help_text_mentions_json_contract() -> None:
     result = runner.invoke(typer_app, ["summarize", "--help"])
     assert result.exit_code == 0
     assert "--file" in result.stdout
+
+
+class TestAdd:
+    def test_add_summarizes_and_overrides_explicit_tags(self) -> None:
+        repo = _fake()
+        fake = FakeLLM(['{"summary": "llm summary", "tags": ["llm1", "llm2"]}'])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app, ["add", "my title", "my body", "--tags", "mine,other"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Added note 1: my title" in result.stdout
+        assert "Summary: llm summary" in result.stdout
+        assert "Tags: llm1, llm2" in result.stdout
+        assert "mine" not in result.stdout
+        assert repo.count() == 1
+        stored = repo.get(1)
+        assert stored.title == "my title"
+        assert stored.body == "my body"
+        assert stored.summary == "llm summary"
+        assert stored.tags == ("llm1", "llm2")
+        # The LLM was fed the body, not the title.
+        assert fake.call_count == 1
+        assert "my body" in fake.prompts[0]
+
+    def test_add_no_llm_keeps_explicit_tags_and_skips_llm(self) -> None:
+        repo = _fake()
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app,
+            ["add", "  spaced title  ", "body text", "--no-llm", "--tags", " a , a ,,b "],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Added note 1: spaced title" in result.stdout
+        assert "Summary" not in result.stdout
+        assert "Tags: a, b" in result.stdout
+        stored = repo.get(1)
+        assert stored.summary is None
+        assert stored.tags == ("a", "b")
+        assert fake.call_count == 0
+
+    def test_add_no_llm_without_tags(self) -> None:
+        repo = _fake()
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["add", "t", "b", "--no-llm"])
+        assert result.exit_code == 0, result.output
+        assert "Added note 1: t" in result.stdout
+        stored = repo.get(1)
+        assert stored.summary is None
+        assert stored.tags == ()
+
+    def test_add_blank_title_fails_without_llm_or_persist(self) -> None:
+        repo = _fake()
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["add", "   ", "body"])
+        assert result.exit_code != 0
+        assert "title" in result.stdout
+        assert fake.call_count == 0
+        assert repo.count() == 0
+
+    def test_add_blank_body_fails_without_llm_or_persist(self) -> None:
+        repo = _fake()
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["add", "title", "   "])
+        assert result.exit_code != 0
+        assert "body" in result.stdout
+        assert fake.call_count == 0
+        assert repo.count() == 0
+
+    def test_add_too_many_tags_fails_without_persist(self) -> None:
+        repo = _fake()
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app,
+            ["add", "t", "b", "--no-llm", "--tags", "1,2,3,4,5,6"],
+        )
+        assert result.exit_code != 0
+        assert "at most 5 tags" in result.stdout
+        assert repo.count() == 0
+        assert fake.call_count == 0
+
+    def test_add_persistence_error_reports_and_exits_nonzero(self) -> None:
+        repo = _fake()
+        repo.fail_save_with = PersistenceError("disk on fire")
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["add", "t", "b", "--no-llm"])
+        assert result.exit_code != 0
+        assert "disk on fire" in result.stdout
+        assert repo.count() == 0
+
+
+class TestList:
+    def test_list_empty_reports_no_notes(self) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["list"])
+        assert result.exit_code == 0, result.output
+        assert "No notes found." in result.stdout
+
+    def test_list_prints_newest_first_with_tags_placeholder(self) -> None:
+        repo = _fake()
+        older = Note.create("older", "b1", summary="s1", tags=["x", "y"], now=NOW)
+        newer = Note.create("newer", "b2", now=NOW)
+        repo.save(older)
+        repo.save(newer)
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["list"])
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert lines == ["2\tnewer\t-", "1\tolder\tx, y"]
+
+    def test_list_filters_by_tag(self) -> None:
+        repo = _fake()
+        repo.save(Note.create("plain", "b1", tags=["a"], now=NOW))
+        repo.save(Note.create("marked", "b2", tags=["b"], now=NOW))
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["list", "--tag", "b"])
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert lines == ["2\tmarked\tb"]
+
+    def test_list_tag_filter_without_match_reports_no_notes(self) -> None:
+        repo = _fake()
+        repo.save(Note.create("plain", "b1", tags=["a"], now=NOW))
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["list", "--tag", "zzz"])
+        assert result.exit_code == 0, result.output
+        assert "No notes found." in result.stdout
+
+
+class TestShow:
+    def test_show_full_details(self) -> None:
+        repo = _fake()
+        stored = repo.save(
+            Note.create("Title", "body text", summary="sum", tags=["t1"], now=NOW)
+        )
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["show", str(stored.id)])
+        assert result.exit_code == 0, result.output
+        assert f"ID: {stored.id}" in result.stdout
+        assert "Title: Title" in result.stdout
+        assert "Summary: sum" in result.stdout
+        assert "Tags: t1" in result.stdout
+        assert NOW.isoformat() in result.stdout
+        assert "body text" in result.stdout
+
+    def test_show_missing_note_exits_nonzero(self) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["show", "42"])
+        assert result.exit_code != 0
+        assert "Note 42 not found" in result.stdout
+
+    def test_show_note_without_summary_or_tags(self) -> None:
+        repo = _fake()
+        stored = repo.save(Note.create("bare", "body only", now=NOW))
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["show", str(stored.id)])
+        assert result.exit_code == 0, result.output
+        assert "Summary: (none)" in result.stdout
+        assert "Tags: (none)" in result.stdout
+
+
+class TestEdit:
+    def test_update_title_only_keeps_summary_and_tags(self) -> None:
+        repo = _fake()
+        stored = repo.save(
+            Note.create("Old Title", "body", summary="sum", tags=["a", "b"], now=NOW)
+        )
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["edit", str(stored.id), "--title", "New Title"])
+        assert result.exit_code == 0, result.output
+        assert f"Updated note {stored.id}: New Title" in result.stdout
+        updated = repo.get(stored.id)
+        assert updated.title == "New Title"
+        assert updated.body == "body"
+        assert updated.summary == "sum"
+        assert updated.tags == ("a", "b")
+        assert fake.call_count == 0
+        assert "update" in repo.calls
+
+    def test_update_body_re_summarizes_via_llm(self) -> None:
+        repo = _fake()
+        stored = repo.save(
+            Note.create("Title", "old body", summary="old sum", tags=["x"], now=NOW)
+        )
+        fake = FakeLLM(
+            ['{"summary": "new sum", "tags": ["c1", "c2"]}']
+        )
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app, ["edit", str(stored.id), "--body", "new body"]
+        )
+        assert result.exit_code == 0, result.output
+        updated = repo.get(stored.id)
+        assert updated.body == "new body"
+        assert updated.summary == "new sum"
+        assert updated.tags == ("c1", "c2")
+        assert fake.call_count == 1
+        assert "new body" in fake.prompts[0]
+
+    def test_update_body_with_explicit_tags_keeps_them(self) -> None:
+        repo = _fake()
+        stored = repo.save(Note.create("Title", "old body", now=NOW))
+        fake = FakeLLM(
+            ['{"summary": "llm sum", "tags": ["llmtag"]}']
+        )
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app,
+            [
+                "edit",
+                str(stored.id),
+                "--body",
+                "new body",
+                "--tags",
+                "mine, other",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        updated = repo.get(stored.id)
+        assert updated.summary == "llm sum"
+        assert updated.tags == ("mine", "other")
+        assert fake.call_count == 1
+
+    def test_update_body_no_llm_skips_summarization(self) -> None:
+        repo = _fake()
+        stored = repo.save(
+            Note.create("Title", "old body", summary="keep me", tags=["t"], now=NOW)
+        )
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(
+            typer_app,
+            ["edit", str(stored.id), "--body", "new body", "--no-llm"],
+        )
+        assert result.exit_code == 0, result.output
+        updated = repo.get(stored.id)
+        assert updated.body == "new body"
+        assert updated.summary == "keep me"
+        assert updated.tags == ("t",)
+        assert fake.call_count == 0
+
+    def test_blank_title_rejected(self) -> None:
+        repo = _fake()
+        stored = repo.save(Note.create("Title", "body", now=NOW))
+        fake = FakeLLM([])
+        typer_app = build_app(llm=fake, repo=repo)
+        result = runner.invoke(typer_app, ["edit", str(stored.id), "--title", "   "])
+        assert result.exit_code != 0
+        assert "Title must not be empty" in result.stdout
+        assert repo.get(stored.id).title == "Title"
+        assert fake.call_count == 0
+
+    def test_update_missing_note_exits_nonzero(self) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["edit", "99", "--title", "X"])
+        assert result.exit_code != 0
+        assert "Note 99 not found" in result.stdout
+
+    def test_update_persistence_failure_reports_error(self) -> None:
+        repo = _fake()
+        stored = repo.save(Note.create("Title", "body", now=NOW))
+        repo.fail_update_with = PersistenceError("disk full")
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["edit", str(stored.id), "--title", "X"])
+        assert result.exit_code != 0
+        assert "disk full" in result.stdout
+        assert repo.get(stored.id).title == "Title"
+
+
+class TestDelete:
+    def test_delete_success_removes_note(self) -> None:
+        repo = _fake()
+        stored = repo.save(Note.create("Title", "body", now=NOW))
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["delete", str(stored.id)])
+        assert result.exit_code == 0, result.output
+        assert f"Deleted note {stored.id}" in result.stdout
+        assert repo.count() == 0
+        assert "delete" in repo.calls
+
+    def test_delete_missing_note_exits_nonzero(self) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["delete", "7"])
+        assert result.exit_code != 0
+        assert "Note 7 not found" in result.stdout
+        assert repo.count() == 0
+
+    def test_delete_only_target_keeps_others(self) -> None:
+        repo = _fake()
+        first = repo.save(Note.create("keep", "b1", now=NOW))
+        second = repo.save(Note.create("drop", "b2", now=NOW))
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(typer_app, ["delete", str(second.id)])
+        assert result.exit_code == 0, result.output
+        assert repo.count() == 1
+        assert repo.get(first.id).title == "keep"

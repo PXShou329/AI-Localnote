@@ -1,4 +1,9 @@
-"""Command-line interface for LocalNote AI (M1 summarize, M2 summary + tags)."""
+"""Command-line interface for LocalNote AI.
+
+M1/M2: ``summarize`` — standalone summarization of text or a file.
+M5: note management (``add``/``list``/``show``/``edit``/``delete``) backed by
+``NoteService`` + SQLite; LLM enrichment is on by default (``--no-llm`` skips it).
+"""
 
 from __future__ import annotations
 
@@ -8,8 +13,11 @@ from typing import Annotated
 import typer
 
 from .config import load_settings
+from .exceptions import NoteNotFoundError, PersistenceError
 from .llm import ChatClient, LLMError, OllamaClient, ParseError, summarize_file, summarize_text
+from .repository import NoteRepository, SQLiteNoteRepository
 from .schema import SummaryTagsResult
+from .service import NoSummarizer, NoteService, OllamaSummarizer
 
 
 def _version_callback(value: bool) -> None:
@@ -20,11 +28,19 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def build_app(llm: ChatClient | None = None) -> typer.Typer:
-    """Build a Typer app, optionally with an injected ChatClient (for tests)."""
+def build_app(
+    llm: ChatClient | None = None,
+    repo: NoteRepository | None = None,
+) -> typer.Typer:
+    """Build a Typer app; ``llm``/``repo`` may be injected for tests.
+
+    When not injected they are constructed lazily from environment settings on
+    first use, so importing the module (or running ``--help``) never touches
+    the network or the database.
+    """
     typer_app = typer.Typer(
         name="localnote",
-        help="Local-first note summarization powered by Ollama.",
+        help="Local-first note management with Ollama summaries.",
         no_args_is_help=True,
     )
 
@@ -43,9 +59,18 @@ def build_app(llm: ChatClient | None = None) -> typer.Typer:
         """LocalNote AI entry point."""
         del version  # handled in the callback
 
-    if llm is None:
-        settings = load_settings()
-        llm = OllamaClient(settings)
+    def _llm() -> ChatClient:
+        nonlocal llm
+        if llm is None:
+            llm = OllamaClient(load_settings())
+        return llm
+
+    def _service(use_llm: bool) -> NoteService:
+        nonlocal repo
+        if repo is None:
+            repo = SQLiteNoteRepository(load_settings().db_path)
+        summarizer = OllamaSummarizer(_llm()) if use_llm else NoSummarizer()
+        return NoteService(repo, summarizer)
 
     @typer_app.command()
     def summarize(
@@ -71,10 +96,10 @@ def build_app(llm: ChatClient | None = None) -> typer.Typer:
             )
         try:
             if file is not None:
-                result = summarize_file(llm, file)
+                result = summarize_file(_llm(), file)
             else:
                 assert text is not None
-                result = summarize_text(llm, text)
+                result = summarize_text(_llm(), text)
         except ParseError as exc:
             # JSON was produced but failed validation twice -> clear message, no traceback.
             typer.echo(str(exc))
@@ -90,7 +115,142 @@ def build_app(llm: ChatClient | None = None) -> typer.Typer:
             raise typer.Exit(code=1) from exc
         print_summary_and_tags(result)
 
+    @typer_app.command()
+    def add(
+        title: Annotated[str, typer.Argument(help="Note title (non-empty).")],
+        body: Annotated[str, typer.Argument(help="Note body (non-empty).")],
+        tags: Annotated[
+            str | None,
+            typer.Option("--tags", "-t", help="Comma-separated tags (max 5)."),
+        ] = None,
+        no_llm: Annotated[
+            bool,
+            typer.Option("--no-llm", help="Store without LLM summarization."),
+        ] = False,
+    ) -> None:
+        """Create a note; the LLM adds a summary + tags unless --no-llm."""
+        try:
+            note = _service(use_llm=not no_llm).create_note(
+                title, body, tags=_tags_from_str(tags)
+            )
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except (LLMError, ValueError) as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Added note {note.id}: {note.title}")
+        if note.summary:
+            typer.echo(f"Summary: {note.summary}")
+        if note.tags:
+            typer.echo(f"Tags: {', '.join(note.tags)}")
+
+    @typer_app.command("list")
+    def list_notes(
+        tag: Annotated[
+            str | None,
+            typer.Option("--tag", help="Only list notes carrying this tag."),
+        ] = None,
+    ) -> None:
+        """List notes, newest first (id, title, tags)."""
+        try:
+            notes = _service(use_llm=False).list_notes()
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        if tag is not None:
+            notes = tuple(note for note in notes if tag in note.tags)
+        if not notes:
+            typer.echo("No notes found.")
+            return
+        for note in notes:
+            typer.echo(f"{note.id}\t{note.title}\t{', '.join(note.tags) or '-'}")
+
+    @typer_app.command()
+    def show(note_id: Annotated[int, typer.Argument(help="Note id.")]) -> None:
+        """Show one note's full details."""
+        try:
+            note = _service(use_llm=False).get_note(note_id)
+        except NoteNotFoundError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"ID: {note.id}")
+        typer.echo(f"Title: {note.title}")
+        typer.echo(f"Summary: {note.summary or '(none)'}")
+        typer.echo(f"Tags: {', '.join(note.tags) or '(none)'}")
+        typer.echo(f"Created: {note.created_at.isoformat()}")
+        typer.echo(f"Updated: {note.updated_at.isoformat()}")
+        typer.echo("")
+        typer.echo(note.body)
+
+    @typer_app.command()
+    def edit(
+        note_id: Annotated[int, typer.Argument(help="Note id.")],
+        title: Annotated[
+            str | None,
+            typer.Option("--title", help="New title (non-empty)."),
+        ] = None,
+        body: Annotated[
+            str | None,
+            typer.Option("--body", "-b", help="New body; re-summarized when the LLM runs."),
+        ] = None,
+        tags: Annotated[
+            str | None,
+            typer.Option(
+                "--tags",
+                "-t",
+                help="Replace tags (comma-separated; empty value clears them).",
+            ),
+        ] = None,
+        no_llm: Annotated[
+            bool,
+            typer.Option("--no-llm", help="Skip LLM re-summarization."),
+        ] = False,
+    ) -> None:
+        """Update a note's title, body, and/or tags."""
+        try:
+            note = _service(use_llm=not no_llm).update_note(
+                note_id, title=title, body=body, tags=_tags_from_str(tags)
+            )
+        except NoteNotFoundError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except (LLMError, ValueError) as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Updated note {note.id}: {note.title}")
+
+    @typer_app.command()
+    def delete(note_id: Annotated[int, typer.Argument(help="Note id.")]) -> None:
+        """Delete a note by id."""
+        try:
+            _service(use_llm=False).delete_note(note_id)
+        except NoteNotFoundError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Deleted note {note_id}")
+
     return typer_app
+
+
+def _tags_from_str(raw: str | None) -> list[str] | None:
+    """Parse a comma-separated ``--tags`` value.
+
+    ``None`` (option not given) means "keep existing tags"; a given value —
+    including empty, which clears tags — becomes a (possibly empty) list.
+    """
+    if raw is None:
+        return None
+    return [tag for tag in (part.strip() for part in raw.split(",")) if tag]
 
 
 def print_summary_and_tags(result: SummaryTagsResult) -> None:

@@ -48,6 +48,15 @@ class FakeNoteRepository:
         self._next_id += 1
         return stored
 
+    def update(self, note: Note) -> Note:
+        self.calls.append("update")
+        if note.id is None:
+            raise PersistenceError("Cannot update a note without an id")
+        if note.id not in self._notes:
+            raise NoteNotFoundError(note.id)
+        self._notes[note.id] = note
+        return note
+
     def get(self, note_id: int) -> Note:
         self.calls.append("get")
         try:
@@ -143,6 +152,24 @@ class TestCreateNote:
         assert stored.created_at.tzinfo is not None
 
 
+    def test_explicit_tags_used_without_summarizer(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, None)
+        stored = service.create_note("t", "b", tags=["mine", "mine", "", "yours"], now=NOW)
+        assert stored.summary is None
+        assert stored.tags == ("mine", "yours")
+
+    def test_llm_tags_win_over_explicit_tags(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer(
+            SummaryTagsResult(summary="s", tags=["llm"])
+        )
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("t", "b", tags=["mine"], now=NOW)
+        assert stored.summary == "s"
+        assert stored.tags == ("llm",)
+
+
 class TestReadDelete:
     def test_get_note_returns_stored_note(self) -> None:
         service = _service()
@@ -175,6 +202,156 @@ class TestReadDelete:
         with pytest.raises(NoteNotFoundError) as excinfo:
             service.delete_note(12)
         assert excinfo.value.note_id == 12
+
+
+class TestUpdateNote:
+    def _stored(self, **overrides: object) -> tuple[FakeNoteRepository, int]:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        stored = service.create_note("title", "original body", now=NOW)
+        for key, value in overrides.items():
+            setattr(repo, key, value)
+        return repo, stored.id
+
+    def test_no_fields_raises_without_touching_repository(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        with pytest.raises(ValueError, match="Nothing to update"):
+            service.update_note(1)
+        assert repo.calls == []
+
+    def test_blank_title_rejected_before_persistence(self) -> None:
+        repo = FakeNoteRepository()
+        stored_id = repo.save(Note.create("t", "b", now=NOW)).id
+        service = NoteService(repo, FakeSummarizer())
+        with pytest.raises(ValueError, match="Title must not be empty"):
+            service.update_note(stored_id, title="   ")
+        assert repo.get(stored_id).title == "t"
+
+    def test_body_change_re_summarizes_and_replaces_tags(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer(
+            SummaryTagsResult(summary="new summary", tags=["n1", "n2"])
+        )
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("t", "old body", now=NOW)
+        summarizer.calls.clear()
+
+        updated = service.update_note(stored.id, body="brand new body")
+
+        assert updated.body == "brand new body"
+        assert updated.summary == "new summary"
+        assert updated.tags == ("n1", "n2")
+        assert updated.id == stored.id
+        assert updated.created_at == stored.created_at
+        assert updated.updated_at >= stored.updated_at
+        assert summarizer.calls == ["brand new body"]
+        assert repo.get(stored.id) == updated
+
+    def test_body_change_with_explicit_tags_keeps_only_summary(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer(
+            SummaryTagsResult(summary="new summary", tags=["ignored"])
+        )
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("t", "old body", now=NOW)
+        summarizer.calls.clear()
+
+        updated = service.update_note(stored.id, body="brand new body", tags=["mine"])
+
+        assert updated.summary == "new summary"
+        assert updated.tags == ("mine",)
+        assert summarizer.calls == ["brand new body"]
+
+    def test_unchanged_body_does_not_call_summarizer(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("t", "same body", now=NOW)
+        summarizer.calls.clear()
+
+        updated = service.update_note(stored.id, body="same body", title="new title")
+
+        assert updated.title == "new title"
+        assert updated.body == "same body"
+        assert updated.summary == stored.summary  # kept
+        assert updated.tags == stored.tags  # kept
+        assert summarizer.calls == []
+
+    def test_no_summarizer_body_change_keeps_summary_and_tags(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, None)
+        stored = repo.save(
+            Note.create("t", "old body", summary="kept summary", tags=["kept"], now=NOW)
+        )
+
+        updated = service.update_note(stored.id, body="new body")
+
+        assert updated.body == "new body"
+        assert updated.summary == "kept summary"
+        assert updated.tags == ("kept",)
+
+    def test_no_summarizer_body_change_with_explicit_tags(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, None)
+        stored = repo.save(
+            Note.create("t", "old body", summary="kept summary", tags=["old"], now=NOW)
+        )
+
+        updated = service.update_note(stored.id, body="new body", tags=["new"])
+
+        assert updated.tags == ("new",)
+        assert updated.summary == "kept summary"
+
+    def test_title_only_update_keeps_body_summary_tags(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("old title", "body", now=NOW)
+        summarizer.calls.clear()
+
+        updated = service.update_note(stored.id, title="  new title  ")
+
+        assert updated.title == "new title"
+        assert updated.body == "body"
+        assert updated.summary == stored.summary
+        assert updated.tags == stored.tags
+        assert summarizer.calls == []
+
+    def test_tags_only_update_replaces_tags_without_summarization(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+        stored = service.create_note("t", "b", now=NOW)
+        summarizer.calls.clear()
+
+        updated = service.update_note(stored.id, tags=["fresh", "tag"])
+
+        assert updated.tags == ("fresh", "tag")
+        assert updated.summary == stored.summary
+        assert summarizer.calls == []
+
+    def test_explicit_empty_tags_clears_them(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        stored = service.create_note("t", "b", now=NOW)
+
+        updated = service.update_note(stored.id, tags=[])
+
+        assert updated.tags == ()
+
+    def test_missing_note_raises_not_found(self) -> None:
+        service = _service()
+        with pytest.raises(NoteNotFoundError) as excinfo:
+            service.update_note(77, title="t")
+        assert excinfo.value.note_id == 77
+
+    def test_more_than_five_tags_rejected(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        stored_id = repo.save(Note.create("t", "b", now=NOW)).id
+        with pytest.raises(ValueError, match="at most 5 tags"):
+            service.update_note(stored_id, tags=["a", "b", "c", "d", "e", "f"])
 
 
 class TestOllamaSummarizer:
