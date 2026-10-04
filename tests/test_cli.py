@@ -47,6 +47,7 @@ class FakeNoteRepository:
         self.calls: list[str] = []
         self.fail_save_with: Exception | None = None
         self.fail_update_with: Exception | None = None
+        self.fail_search_with: Exception | None = None
 
     def save(self, note: Note) -> Note:
         self.calls.append("save")
@@ -88,6 +89,23 @@ class FakeNoteRepository:
     def list_all(self) -> tuple[Note, ...]:
         self.calls.append("list_all")
         return tuple(self._notes[key] for key in sorted(self._notes, reverse=True))
+
+    def search(self, query: str) -> tuple[Note, ...]:
+        self.calls.append("search")
+        if self.fail_search_with is not None:
+            raise self.fail_search_with
+        if not query.strip():
+            msg = "Search query must not be empty after stripping whitespace"
+            raise ValueError(msg)
+        needle = query.strip().lower()
+        return tuple(
+            self._notes[key]
+            for key in sorted(self._notes, reverse=True)
+            if needle in self._notes[key].title.lower()
+            or needle in self._notes[key].body.lower()
+            # M6 contract: title/body/summary only, tags excluded.
+            or needle in (self._notes[key].summary or "").lower()
+        )
 
     def delete(self, note_id: int) -> None:
         self.calls.append("delete")

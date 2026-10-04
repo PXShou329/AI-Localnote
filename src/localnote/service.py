@@ -209,6 +209,27 @@ class NoteService:
         """
         self._repo.delete(note_id)
 
+    def search_notes(self, query: str, limit: int = 20) -> tuple[Note, ...]:
+        """Search stored notes for a literal substring.
+
+        ``query`` is stripped and must be non-empty; matching is delegated to
+        the repository, which searches title, body, and summary with strict
+        ``LIKE`` escaping so ``%``, ``_`` and ``\\`` never act as wildcards.
+
+        ``limit`` caps the number of returned notes (newest first) and
+        defaults to 20; it is forwarded to the repository unchanged.
+
+        Raises:
+            ValueError: if ``query`` is empty after stripping whitespace, or
+                if ``limit`` is not positive.
+        """
+        if not query.strip():
+            msg = "Search query must not be empty after stripping whitespace"
+            raise ValueError(msg)
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        return self._repo.search(query.strip(), limit)
+
 
 __all__: Sequence[str] = (
     "NoSummarizer",

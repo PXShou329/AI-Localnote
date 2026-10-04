@@ -239,6 +239,30 @@ def build_app(
             raise typer.Exit(code=1) from exc
         typer.echo(f"Deleted note {note_id}")
 
+    @typer_app.command()
+    def search(
+        query: Annotated[
+            str,
+            typer.Argument(
+                help="Literal text to find in titles, bodies, and summaries."
+            ),
+        ],
+    ) -> None:
+        """Search notes by literal text (newest first; % and _ match literally)."""
+        try:
+            notes = _service(use_llm=False).search_notes(query)
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        except ValueError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        if not notes:
+            typer.echo("No notes found.")
+            return
+        for note in notes:
+            typer.echo(f"{note.id}\t{note.title}\t{', '.join(note.tags) or '-'}")
+
     return typer_app
 
 

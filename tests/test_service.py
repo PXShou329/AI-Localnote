@@ -27,6 +27,7 @@ class FakeNoteRepository:
         self._notes: dict[int, Note] = {}
         self._next_id = 1
         self.calls: list[str] = []
+        self.search_args: list[tuple[str, int]] = []
         self.fail_save_with: Exception | None = None
 
     def save(self, note: Note) -> Note:
@@ -67,6 +68,24 @@ class FakeNoteRepository:
     def list_all(self) -> tuple[Note, ...]:
         self.calls.append("list_all")
         return tuple(self._notes[key] for key in sorted(self._notes, reverse=True))
+
+    def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
+        self.calls.append("search")
+        self.search_args.append((query, limit))
+        if not query.strip():
+            msg = "Search query must not be empty after stripping whitespace"
+            raise ValueError(msg)
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        needle = query.strip().lower()
+        return tuple(
+            self._notes[key]
+            for key in sorted(self._notes, reverse=True)
+            if needle in self._notes[key].title.lower()
+            or needle in self._notes[key].body.lower()
+            # M6 contract: title/body/summary only, tags excluded.
+            or needle in (self._notes[key].summary or "").lower()
+        )
 
     def delete(self, note_id: int) -> None:
         self.calls.append("delete")
@@ -352,6 +371,84 @@ class TestUpdateNote:
         stored_id = repo.save(Note.create("t", "b", now=NOW)).id
         with pytest.raises(ValueError, match="at most 5 tags"):
             service.update_note(stored_id, tags=["a", "b", "c", "d", "e", "f"])
+
+
+class TestSearchNotes:
+    def test_search_delegates_to_repository_and_returns_matches(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        repo.save(Note.create("Groceries", "milk and eggs", now=NOW))
+        repo.save(Note.create("Work", "ship the release", tags=["release"], now=NOW))
+
+        results = service.search_notes("milk")
+
+        assert len(results) == 1
+        assert results[0].title == "Groceries"
+        assert repo.calls == ["save", "save", "search"]
+
+    def test_search_query_whitespace_is_normalized_before_delegation(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        seen: list[str] = []
+        original_search = repo.search
+
+        def recording_search(query: str, limit: int = 20) -> tuple[Note, ...]:
+            seen.append(query)
+            return original_search(query, limit)
+
+        repo.search = recording_search
+        repo.save(Note.create("Groceries", "milk and eggs", now=NOW))
+
+        results = service.search_notes("  milk  ")
+
+        assert len(results) == 1
+        assert results[0].title == "Groceries"
+        assert seen == ["milk"]
+
+    def test_search_does_not_call_summarizer(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+        repo.save(Note.create("Groceries", "milk and eggs", now=NOW))
+
+        results = service.search_notes("milk")
+
+        assert len(results) == 1
+        assert summarizer.calls == []
+
+    def test_search_rejects_whitespace_only_query(self) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            service.search_notes("   ")
+
+        assert "search" not in repo.calls
+        assert summarizer.calls == []
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_search_rejects_non_positive_limit(self, limit: int) -> None:
+        repo = FakeNoteRepository()
+        summarizer = FakeSummarizer()
+        service = NoteService(repo, summarizer)
+
+        with pytest.raises(ValueError, match="limit must be > 0"):
+            service.search_notes("milk", limit=limit)
+
+        assert "search" not in repo.calls
+        assert summarizer.calls == []
+
+    def test_search_forwards_limit_to_repository(self) -> None:
+        repo = FakeNoteRepository()
+        service = NoteService(repo, FakeSummarizer())
+        repo.save(Note.create("Groceries", "milk and eggs", now=NOW))
+
+        results = service.search_notes("milk", limit=3)
+
+        assert len(results) == 1
+        assert results[0].title == "Groceries"
+        assert repo.search_args == [("milk", 3)]
 
 
 class TestOllamaSummarizer:

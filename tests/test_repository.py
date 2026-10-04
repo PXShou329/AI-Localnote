@@ -228,10 +228,129 @@ def test_corrupt_tags_payload_raises_persistence_error(tmp_db_path) -> None:
     repo.close()
 
 
-def test_repository_satisfies_protocol_duck_typed(tmp_db_path) -> None:
-    repo: object = SQLiteNoteRepository(tmp_db_path)
-    for method in ("save", "update", "get", "delete", "list_all", "count", "close"):
-        assert callable(getattr(repo, method))
+class TestSearch:
+    def test_finds_in_title_body_and_summary(self, tmp_db_path) -> None:
+        # Approved M6 search fields: title, body, summary. One note matches
+        # each field exclusively; "plain" must never be matched by a tag.
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("unique_title_one", "plain body", tags=["plain"]))
+        repo.save(
+            _make_note("plain title", "mentions unique_body_two inside", tags=["plain"])
+        )
+        repo.save(_make_note("plain title", "plain body", summary="unique_summary_three"))
+
+        hits = repo.search("unique_")
+
+        titles = tuple(note.title for note in hits)
+        assert titles == ("plain title", "plain title", "unique_title_one")  # newest first
+        assert all(
+            "unique_" in (note.title or "") + (note.body or "") + (note.summary or "")
+            for note in hits
+        )
+        repo.close()
+
+    def test_tag_only_match_not_returned(self, tmp_db_path) -> None:
+        # Regression: search is title OR body OR summary; a query that appears
+        # only in a tag MUST NOT return the note.
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("plain title", "plain body", summary=None, tags=("specialtag",)))
+
+        assert repo.search("specialtag") == ()
+
+        # A tag value that also appears in the summary is fine: it matches
+        # through the summary, not through the tag.
+        repo.save(
+            _make_note(
+                "plain title",
+                "plain body",
+                summary="has specialtag inside",
+                tags=("specialtag",),
+            )
+        )
+        assert len(repo.search("specialtag")) == 1
+        repo.close()
+
+    def test_matching_is_literal_not_glob(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("100% complete", "no percent sign", tags=[]))
+        repo.save(_make_note("a_x", "b_x", tags=["c_x"]))
+        repo.save(_make_note("ax", "bx", tags=["cx"]))
+
+        # Unescaped, "%" and "_" would match everything.
+        assert [note.title for note in repo.search("%")] == ["100% complete"]
+        assert [note.title for note in repo.search("_")] == ["a_x"]
+        # The escape character itself is literal too.
+        repo.save(_make_note("back\\slash", "", tags=[]))
+        assert [note.title for note in repo.search("\\")] == ["back\\slash"]
+        repo.close()
+
+    def test_empty_and_blank_queries_rejected(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        with pytest.raises(ValueError):
+            repo.search("")
+        with pytest.raises(ValueError):
+            repo.search("   \t ")
+        repo.close()
+
+    def test_whitespace_is_stripped(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("hello world", "", tags=[]))
+        assert len(repo.search("  hello  ")) == 1
+        repo.close()
+
+    def test_case_insensitive_for_ascii(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("UPPERCASE Body", "", tags=["MixedTag"]))
+        assert len(repo.search("uppercase")) == 1
+        # "mixedtag" exists only in a tag; tags are out of M6 scope, so no hit.
+        assert repo.search("mixedtag") == ()
+        repo.close()
+
+    def test_no_matches_returns_empty_tuple(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        repo.save(_make_note("one", "one body", tags=["one"]))
+        assert repo.search("nope") == ()
+        repo.close()
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_non_positive_limit_rejected(self, tmp_db_path, limit: int) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        with pytest.raises(ValueError, match="limit must be > 0"):
+            repo.search("milk", limit=limit)
+        repo.close()
+
+    def test_explicit_limit_caps_results_newest_first(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        for index in range(1, 6):
+            repo.save(_make_note(f"milk note {index}", "", tags=[]))
+
+        hits = repo.search("milk note", limit=2)
+
+        assert [note.title for note in hits] == ["milk note 5", "milk note 4"]
+        repo.close()
+
+    def test_default_limit_returns_up_to_20_matches(self, tmp_db_path) -> None:
+        repo = SQLiteNoteRepository(tmp_db_path)
+        for index in range(1, 22):
+            repo.save(_make_note(f"milk note {index}", "", tags=[]))
+
+        assert len(repo.search("milk note")) == 20
+        assert len(repo.search("milk note", limit=25)) == 21
+        repo.close()
+
+    def test_repository_satisfies_protocol_duck_typed(self, tmp_db_path) -> None:
+        repo: object = SQLiteNoteRepository(tmp_db_path)
+        for method in (
+            "save",
+            "update",
+            "get",
+            "delete",
+            "list_all",
+            "search",
+            "count",
+            "close",
+        ):
+            assert callable(getattr(repo, method))
 
 
 def test_context_manager_closes_connection(tmp_db_path) -> None:

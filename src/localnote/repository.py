@@ -56,6 +56,17 @@ def _parse_iso(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _escape_like(value: str) -> str:
+    """Escape a literal string for use in a ``LIKE`` pattern.
+
+    ``\\\`` must be escaped first, otherwise the escaping of ``%`` and ``_``
+    would itself be reinterpreted. Combined with ``ESCAPE '\\\` in the SQL,
+    the result matches ``value`` literally, no matter which wildcard-like
+    characters it contains.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class NoteRepository(Protocol):
     """Persistence contract for notes. Callers depend on this, not on SQLite."""
 
@@ -89,6 +100,21 @@ class NoteRepository(Protocol):
 
     def list_all(self) -> tuple[Note, ...]:
         """Return all notes, newest (highest id) first."""
+        ...
+
+    def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
+        """Return notes whose title, body, or summary contain ``query``.
+
+        Matching is literal: LIKE wildcards (``%``, ``_``) and the escape
+        character (``\\\``) in ``query`` never act as wildcards.
+
+        ``limit`` bounds the number of returned notes (newest first) and
+        defaults to 20, so existing callers need no change.
+
+        Raises:
+            ValueError: if ``query`` is empty after stripping, or if
+                ``limit`` is not positive.
+        """
         ...
 
     def count(self) -> int:
@@ -213,6 +239,43 @@ class SQLiteNoteRepository:
             rows = self._conn.execute("SELECT * FROM notes ORDER BY id DESC").fetchall()
         except (sqlite3.Error, OSError) as exc:
             raise PersistenceError(f"List failed: {exc}") from exc
+        return tuple(self._row_to_note(row) for row in rows)
+
+    def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
+        """Literal substring search over title, body, and summary.
+
+        Tags are intentionally not searched (approved M6 scope).
+
+        ``query`` is stripped; LIKE wildcards (``%``, ``_``) and the escape
+        character (``\\\``) are escaped on the Python side so they match
+        literally, and the SQL uses ``ESCAPE '\'`` accordingly. Matching is
+        case-insensitive for ASCII (SQLite's default LIKE semantics).
+
+        ``limit`` caps the number of returned notes without changing the
+        existing newest-first ordering.
+
+        Raises:
+            ValueError: if ``query`` is empty after stripping, or if
+                ``limit`` is not positive.
+        """
+        if not query.strip():
+            msg = "Search query must not be empty after stripping whitespace"
+            raise ValueError(msg)
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        pattern = f"%{_escape_like(query.strip())}%"
+        _esc = "\\"
+        sql = (
+            "SELECT * FROM notes WHERE "
+            "title LIKE ? ESCAPE '" + _esc + "' "
+            "OR body LIKE ? ESCAPE '" + _esc + "' "
+            "OR summary LIKE ? ESCAPE '" + _esc + "' "
+            "ORDER BY id DESC LIMIT ?"
+        )
+        try:
+            rows = self._conn.execute(sql, (pattern, pattern, pattern, limit)).fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            raise PersistenceError(f"Search failed: {exc}") from exc
         return tuple(self._row_to_note(row) for row in rows)
 
     def count(self) -> int:
