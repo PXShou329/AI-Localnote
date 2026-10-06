@@ -7,6 +7,7 @@ no SQLite database and no real Ollama calls.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +49,7 @@ class FakeNoteRepository:
         self.fail_save_with: Exception | None = None
         self.fail_update_with: Exception | None = None
         self.fail_search_with: Exception | None = None
+        self.fail_list_all_with: Exception | None = None
 
     def save(self, note: Note) -> Note:
         self.calls.append("save")
@@ -88,6 +90,8 @@ class FakeNoteRepository:
 
     def list_all(self) -> tuple[Note, ...]:
         self.calls.append("list_all")
+        if self.fail_list_all_with is not None:
+            raise self.fail_list_all_with
         return tuple(self._notes[key] for key in sorted(self._notes, reverse=True))
 
     def search(self, query: str) -> tuple[Note, ...]:
@@ -501,3 +505,70 @@ class TestDelete:
         assert result.exit_code == 0, result.output
         assert repo.count() == 1
         assert repo.get(first.id).title == "keep"
+
+
+class TestExport:
+    def test_export_all_to_file(self, tmp_path: Path) -> None:
+        repo = _fake()
+        a = repo.save(Note.create("Alpha", "a-body", now=NOW))
+        b = repo.save(Note.create("Beta", "b-body", now=NOW))
+        llm = FakeLLM([])
+        typer_app = build_app(llm=llm, repo=repo)
+        out_file = tmp_path / "notes.json"
+        result = runner.invoke(typer_app, ["export", str(out_file)])
+        assert result.exit_code == 0, result.output
+        assert "Exported 2 notes" in result.stdout
+        assert out_file.is_file()
+        payload = json.loads(out_file.read_text(encoding="utf-8"))
+        assert payload["version"] == 1
+        assert payload["format"] == "localnote"
+        assert [note["id"] for note in payload["notes"]] == [b.id, a.id]
+        assert payload["notes"][0]["title"] == "Beta"
+        assert llm.call_count == 0
+
+    def test_export_empty_database(self, tmp_path: Path) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        out_file = tmp_path / "empty.json"
+        result = runner.invoke(typer_app, ["export", str(out_file)])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(out_file.read_text(encoding="utf-8"))
+        assert payload["notes"] == []
+        assert "Exported 0 notes" in result.stdout
+
+    def test_export_existing_target_requires_force(self, tmp_path: Path) -> None:
+        repo = _fake()
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        out_file = tmp_path / "notes.json"
+        out_file.write_text("keep original", encoding="utf-8")
+        result = runner.invoke(typer_app, ["export", str(out_file)])
+        assert result.exit_code == 1
+        assert "--force" in result.stdout
+        assert out_file.read_text(encoding="utf-8") == "keep original"
+        result = runner.invoke(typer_app, ["export", str(out_file), "--force"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(out_file.read_text(encoding="utf-8"))["notes"] == []
+
+    def test_export_invalid_parent_exits_nonzero(self, tmp_path: Path) -> None:
+        out_file = tmp_path / "missing" / "notes.json"
+        result = runner.invoke(build_app(repo=_fake()), ["export", str(out_file)])
+        assert result.exit_code == 1
+        assert "Failed to write export" in result.stdout
+        assert not out_file.parent.exists()
+
+    def test_export_requires_path(self) -> None:
+        result = runner.invoke(build_app(repo=_fake()), ["export"])
+        assert result.exit_code == 2
+        assert "Missing argument" in result.output
+
+    def test_export_persistence_failure_reports_error(self, tmp_path: Path) -> None:
+        repo = _fake()
+        repo.save(Note.create("Title", "body", now=NOW))
+        repo.fail_list_all_with = PersistenceError("disk full")
+        typer_app = build_app(llm=FakeLLM([]), repo=repo)
+        result = runner.invoke(
+            typer_app, ["export", str(tmp_path / "full.json")]
+        )
+        assert result.exit_code != 0
+        assert "disk full" in result.stdout
+        assert not (tmp_path / "full.json").exists()

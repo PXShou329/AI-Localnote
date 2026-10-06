@@ -7,13 +7,15 @@ disk; optional LLM calls produce summaries/tags.
 
 ```
 CLI (typer)  ->  Service  ->  Repository  ->  sqlite3
-                        \->  LLM client
+                        \->  Summarizer  ->  LLM client
+                        \->  Exporter  ->  filesystem
 ```
 
 - **CLI** (`src/localnote/cli.py`): thin Typer commands; parses arguments,
   formats output, no business logic.
 - **Service**: business logic (create/update/list notes, attach summaries).
-  Depends only on the `NoteRepository` protocol and the LLM client.
+  Depends on the `NoteRepository` and `Summarizer` protocols. Export reads all
+  notes through the repository and delegates serialization/file safety to the exporter.
 - **Repository** (`src/localnote/repository.py`): the only layer that touches
   SQLite. `NoteRepository` is a `typing.Protocol`; callers depend on the
   protocol so fakes can stand in during service/CLI tests.
@@ -29,6 +31,22 @@ CLI (typer)  ->  Service  ->  Repository  ->  sqlite3
 | `src/localnote/exceptions.py` | `PersistenceError` (wraps every sqlite3/OSError with the original chained) and `NoteNotFoundError` (carries `note_id`). Callers never see raw `sqlite3.Error`. |
 | `src/localnote/config.py` | DB path resolution (home-dir based, overridable via env). |
 | `src/localnote/llm.py`, `src/localnote/schema.py` | LLM client and Pydantic-style structured results. |
+| `src/localnote/exporter.py` | JSON v1: `format="localnote"`, integer `version=1`, aware UTC `exported_at`, and `notes`. UTF-8 with `ensure_ascii=False`; serializes the seven existing Note fields, timestamps via `isoformat()`. Uses a same-directory temporary file, flush/fsync/close, then an exclusive atomic hard link or `os.replace` with `--force`. Failures clean the temporary file and preserve the prior destination. No LLM calls; no import support in v0.1.0. |
+
+## Search and export contracts
+
+Search is a parameterized SQLite LIKE substring query over title/body/summary,
+excluding tags. Surrounding query whitespace is stripped; `%`, `_`, and `\`
+match literally. SQLite LIKE is case-insensitive for ASCII, with no general
+Unicode case folding. Results are ordered by descending id; the service and
+repository accept a positive limit (default 20). Search never calls the LLM.
+
+`localnote export PATH [--force]` exports every note, ordered by descending id.
+The parent must exist. `ExportConflictError` extends `PersistenceError` and
+reports an existing destination without force. Other expected serialization
+or I/O failures are chained as `PersistenceError`; unrelated programming
+errors propagate. Hard links are required for publication without force so
+the no-overwrite guarantee also holds when a destination appears concurrently.
 
 ## Conventions
 

@@ -3,6 +3,7 @@
 M1/M2: ``summarize`` — standalone summarization of text or a file.
 M5: note management (``add``/``list``/``show``/``edit``/``delete``) backed by
 ``NoteService`` + SQLite; LLM enrichment is on by default (``--no-llm`` skips it).
+M7: ``export`` — atomically write all notes to a versioned JSON file.
 """
 
 from __future__ import annotations
@@ -262,6 +263,25 @@ def build_app(
             return
         for note in notes:
             typer.echo(f"{note.id}\t{note.title}\t{', '.join(note.tags) or '-'}")
+
+    @typer_app.command()
+    def export(
+        path: Annotated[
+            Path,
+            typer.Argument(help="Destination JSON path; parent directory must exist."),
+        ],
+        force: Annotated[
+            bool,
+            typer.Option("--force", help="Replace an existing destination atomically."),
+        ] = False,
+    ) -> None:
+        """Export all notes as UTF-8 JSON v1, newest first, without using the LLM."""
+        try:
+            count = _service(use_llm=False).export_notes(path, force=force)
+        except PersistenceError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Exported {count} note{'s' if count != 1 else ''} to {path}")
 
     return typer_app
 

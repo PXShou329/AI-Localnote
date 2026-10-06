@@ -1,6 +1,6 @@
 # LocalNote AI — Status
 
-Updated: 2026-09-29
+Updated: 2026-10-07
 
 ## Milestones
 
@@ -11,12 +11,27 @@ Updated: 2026-09-29
 | M3 — SQLite persistence | **Done** | `models.py`, `repository.py`, `exceptions.py` + full test suites |
 | M4 — Service layer | **Done** | `service.py` (commit `55a7039`): `NoteService`, `Summarizer` protocol, `OllamaSummarizer` adapter |
 | M5 — CLI commands | **Done** | `cli.py` (commit `13fc018`): note add/list/show/edit/delete subcommands |
+| M6 — Local search | **Done** | Literal title/body/summary search, parameterized SQL, limit, descending id; no LLM |
+| M7 — JSON export | **Done** | `export PATH [--force]`, JSON v1, Unicode, aware UTC export time, atomic publication, failure cleanup; no LLM and no import |
+| M8 — Release hardening | Pending | Resource/error/help audit, packaging, smoke tests, and final documentation |
 
-## Current verification (2026-09-29)
+## M7 verification (2026-10-07)
 
-- `pytest tests/ -q` — 123 passed
+- `pytest tests/ -q` — 174 passed
 - `ruff check src tests` — All checks passed
-- `mypy src` (strict) — no issues found in 9 source files
+- `python -m mypy src` (strict) — no issues found in 10 source files
+
+## Handoff reconciliation
+
+- Starting HEAD matched `d1e75bc feat: add local note search`; remote main
+  matched this commit as well.
+- Uncommitted M7 drafts existed in CLI, service, exceptions, exporter, and
+  CLI tests. They were backed up outside the repository before continuation.
+- The drafts used `export [NOTE_ID] -o PATH`, a string version, and direct
+  overwriting. These were reconciled to the supplied `export PATH --force`
+  contract, integer JSON v1, UTC export time, and atomic file safety.
+- README was absent; this milestone adds it. Prior status documentation
+  stopped at M5 / 123 tests and did not reflect the completed M6.
 
 ## M3 verification
 
@@ -47,3 +62,6 @@ A future dedicated test-typing cleanup may address these.
 - Single-file DB with one connection per repository instance; no WAL mode or
   concurrent-writer support yet (fine for a single-user CLI).
 - No full-text search on body/title (title index only).
+- JSON export without force requires hard-link support on the destination
+  filesystem; failures are reported without falling back to unsafe overwrite.
+- Import is not supported in v0.1.0.

@@ -9,14 +9,18 @@ Dependency direction: CLI -> Service -> (NoteRepository, Summarizer) Protocols.
   summarization never leaves a partial note in the store.
 - ``OllamaSummarizer`` is the concrete ``Summarizer`` adapter over the M1/M2
   LLM module; the wiring itself is left to the CLI layer (M5).
+- ``export_notes`` (M7) orders notes newest-first and delegates the file
+  I/O to the exporter module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol
 
+from .exporter import export_notes_to_file
 from .llm import ChatClient, summarize_text
 from .models import Note
 from .repository import NoteRepository
@@ -229,6 +233,23 @@ class NoteService:
         if limit <= 0:
             raise ValueError("limit must be > 0")
         return self._repo.search(query.strip(), limit)
+
+    def export_notes(
+        self,
+        output_path: Path | str,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Write notes to ``output_path`` as a versioned JSON document.
+
+        Every note is exported newest-first, without invoking the summarizer.
+        The exporter handles atomic publication and overwrite protection;
+        the parent directory must already exist.
+
+        Raises:
+            PersistenceError: if reading notes, serialization, or file I/O fails.
+        """
+        return export_notes_to_file(self._repo.list_all(), output_path, force=force)
 
 
 __all__: Sequence[str] = (

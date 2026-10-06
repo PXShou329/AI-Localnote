@@ -8,6 +8,7 @@ no real Ollama/network calls are ever made.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +121,19 @@ class FakeSummarizer:
 
 def _service() -> NoteService:
     return NoteService(FakeNoteRepository(), FakeSummarizer())
+
+
+def test_export_does_not_call_summarizer(tmp_path: Path) -> None:
+    repo = FakeNoteRepository()
+    repo.save(Note.create("Title", "Body", now=NOW))
+    repo.calls.clear()
+    summarizer = FakeSummarizer(error=AssertionError("Export must not call the LLM"))
+    service = NoteService(repo, summarizer)
+    destination = tmp_path / "notes.json"
+    assert service.export_notes(destination) == 1
+    assert service.export_notes(destination, force=True) == 1
+    assert summarizer.calls == []
+    assert repo.calls == ["list_all", "list_all"]
 
 
 class TestCreateNote:
