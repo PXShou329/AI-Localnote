@@ -48,6 +48,52 @@ or I/O failures are chained as `PersistenceError`; unrelated programming
 errors propagate. Hard links are required for publication without force so
 the no-overwrite guarantee also holds when a destination appears concurrently.
 
+## Public APIs
+
+- `Note`: `id: int | None`, `title: str`, `body: str`, `summary: str | None`,
+  `tags: tuple[str, ...]`, `created_at: datetime`, `updated_at: datetime`.
+  Only the title, summary, tags, and timestamps are normalized by the domain;
+  the service requires nonblank title/body at creation. Domain timestamps are
+  already aware UTC values and export serializes them faithfully.
+- `NoteRepository` / `SQLiteNoteRepository`: `save(note)`, `update(note)`,
+  `get(note_id)`, `delete(note_id)`, `list_all()`, `search(query, limit=20)`,
+  `count()`, `close()`. SQLite also supports context-manager use.
+- `NoteService(repo, summarizer=None)`: `create_note(title, body, *, tags=None,
+  now=None)`, `update_note(note_id, *, title=None, body=None, tags=None)`,
+  `get_note(note_id)`, `list_notes()`, `delete_note(note_id)`,
+  `search_notes(query, limit=20)`, `export_notes(output_path, *, force=False)`.
+- `Summarizer.summarize(text)` returns a validated `SummaryTagsResult` or
+  `None` for no enrichment. `OllamaSummarizer` adapts `ChatClient` and
+  `NoSummarizer` returns `None`. `ChatClient.chat(prompt)` returns text.
+- Export helpers: `build_export_document(notes)` and
+  `export_notes_to_file(notes, output_path, *, force=False)`; export returns
+  the count written and never invokes the summarizer.
+
+## Error boundaries and resource lifecycle
+
+Expected SQLite and filesystem failures become `PersistenceError`, with
+`NoteNotFoundError` and `ExportConflictError` as specialized subclasses.
+Export catches serialization `TypeError`/`ValueError` only around JSON writing;
+unrelated programming errors propagate after temporary-file cleanup.
+LLM failures use `LLMError`: `OllamaError` for HTTP/transport/response errors
+and `ParseError` after two invalid model responses. Transport errors preserve
+their original exception as the cause. Input errors use `ValueError` or Typer
+parameter validation. CLI expected failures show a message and exit nonzero;
+there is no `except Exception` catch-all.
+
+The CLI creates dependencies only when a command needs them. A Typer context
+cleanup callback closes CLI-owned SQLite and Ollama resources on success and
+failure, then resets them so another invocation can create fresh resources.
+Injected dependencies remain caller-owned. SQLite repositories and Ollama
+clients support context managers; an Ollama client closes only HTTP clients
+it creates itself. A SQLite schema-initialization failure closes the opened
+connection before re-raising. Export flushes/fsyncs and closes its temporary
+file before publishing, and removes the temporary path in `finally`.
+
+`import localnote.cli`, root/command help, and `--version` do not open database
+or HTTP resources. Tests use temp databases and mocked transport; optional
+real Ollama smoke is a separate temporary-database check.
+
 ## Conventions
 
 - `requires-python >= 3.10`; stdlib typing only (no `typing.Self`, use `Note`
