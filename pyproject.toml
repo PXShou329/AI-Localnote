@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "localnote"
 version = "0.1.0"
 description = "Local-first CLI for AI-assisted notes via Ollama + SQLite"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12",

@@ -44,9 +44,27 @@ def build_app(
         help="Local-first note management with Ollama summaries.",
         no_args_is_help=True,
     )
+    owned_repo: SQLiteNoteRepository | None = None
+    owned_llm: OllamaClient | None = None
+
+    def _close_resources() -> None:
+        nonlocal repo, llm, owned_repo, owned_llm
+        try:
+            if owned_repo is not None:
+                resource = owned_repo
+                owned_repo = None
+                repo = None
+                resource.close()
+        finally:
+            if owned_llm is not None:
+                client = owned_llm
+                owned_llm = None
+                llm = None
+                client.close()
 
     @typer_app.callback()
     def _build_main(
+        ctx: typer.Context,
         version: Annotated[
             bool,
             typer.Option(
@@ -59,17 +77,20 @@ def build_app(
     ) -> None:
         """LocalNote AI entry point."""
         del version  # handled in the callback
+        ctx.call_on_close(_close_resources)
 
     def _llm() -> ChatClient:
-        nonlocal llm
+        nonlocal llm, owned_llm
         if llm is None:
-            llm = OllamaClient(load_settings())
+            owned_llm = OllamaClient(load_settings())
+            llm = owned_llm
         return llm
 
     def _service(use_llm: bool) -> NoteService:
-        nonlocal repo
+        nonlocal repo, owned_repo
         if repo is None:
-            repo = SQLiteNoteRepository(load_settings().db_path)
+            owned_repo = SQLiteNoteRepository(load_settings().db_path)
+            repo = owned_repo
         summarizer = OllamaSummarizer(_llm()) if use_llm else NoSummarizer()
         return NoteService(repo, summarizer)
 
@@ -110,7 +131,7 @@ def build_app(
             # a single actionable line for the user, never a raw traceback.
             typer.echo(f"Ollama error: {exc}")
             raise typer.Exit(code=1) from exc
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             # Local input problems (e.g. empty file) before any LLM call.
             typer.echo(str(exc))
             raise typer.Exit(code=1) from exc

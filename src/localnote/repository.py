@@ -57,7 +57,7 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _escape_like(value: str) -> str:
-    """Escape a literal string for use in a ``LIKE`` pattern.
+    r"""Escape a literal string for use in a ``LIKE`` pattern.
 
     ``\\\`` must be escaped first, otherwise the escaping of ``%`` and ``_``
     would itself be reinterpreted. Combined with ``ESCAPE '\\\` in the SQL,
@@ -103,7 +103,7 @@ class NoteRepository(Protocol):
         ...
 
     def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
-        """Return notes whose title, body, or summary contain ``query``.
+        r"""Return notes whose title, body, or summary contain ``query``.
 
         Matching is literal: LIKE wildcards (``%``, ``_``) and the escape
         character (``\\\``) in ``query`` never act as wildcards.
@@ -137,7 +137,11 @@ class SQLiteNoteRepository:
         except (OSError, sqlite3.Error) as exc:
             raise PersistenceError(f"Could not open database at {db_path}") from exc
         self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            self._init_schema()
+        except PersistenceError:
+            self.close()
+            raise
 
     def _init_schema(self) -> None:
         try:
@@ -242,7 +246,7 @@ class SQLiteNoteRepository:
         return tuple(self._row_to_note(row) for row in rows)
 
     def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
-        """Literal substring search over title, body, and summary.
+        r"""Literal substring search over title, body, and summary.
 
         Tags are intentionally not searched (approved M6 scope).
 

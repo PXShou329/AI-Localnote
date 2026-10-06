@@ -81,9 +81,14 @@ class OllamaClient:
         }
         if system is not None:
             payload["system"] = system
-        response = self._http_client().post(
-            "/api/chat", json=payload, timeout=self._timeout
-        )
+        try:
+            response = self._http_client().post(
+                "/api/chat", json=payload, timeout=self._timeout
+            )
+        except httpx.HTTPError as exc:
+            raise OllamaError(
+                f"Could not reach Ollama at {self._settings.ollama_url}: {exc}"
+            ) from exc
         if response.status_code >= 400:
             detail = response.text[:500]
             raise OllamaError(
@@ -244,6 +249,8 @@ def summarize_text(llm: ChatClient, text: str) -> SummaryTagsResult:
     M2: the model now returns a summary plus 1..5 tags in a single validated
     JSON object, using the same prompt contract and one-retry policy from M1.
     """
+    if not text.strip():
+        raise ValueError("Text to summarize must not be empty after stripping whitespace")
     json_client = JSONChatClient(llm)
     prompt = (
         "Summarize the following text and extract 1 to 5 short tags for it. "
