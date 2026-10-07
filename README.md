@@ -4,6 +4,10 @@ A local-first Python CLI for notes stored in SQLite, with optional summaries
 and tags produced by Ollama. It supports note CRUD, literal local text search,
 and versioned JSON export. The current version is the **v0.1.0 candidate**.
 
+**第一次使用（Windows PowerShell）：[繁體中文快速開始](QUICKSTART.zh-TW.md)。**
+The guide uses the existing virtual environment and a separate demonstration
+database, then walks through real commands and SQLite backup recovery.
+
 Notes are stored locally. LLM enrichment defaults to local Ollama. Dependency
 installation or user-configured endpoints may use networking. There is no
 built-in cloud synchronization.
@@ -71,7 +75,9 @@ localnote edit 1 --body "Offline edit." --no-llm
 localnote edit 1 --tags "work,review" --no-llm
 localnote edit 1 --tags "" --no-llm
 localnote search "demo"
+localnote search "demo" --limit 5
 localnote delete 1
+localnote delete 1 --yes
 ```
 
 `summarize` accepts exactly one text argument or UTF-8 `--file`; it prints a
@@ -106,10 +112,31 @@ tags. Surrounding query whitespace is stripped and an empty query is rejected.
 `%`, `_`, and `\` match literally; SQL parameters carry user input. SQLite LIKE
 matches ASCII case-insensitively, with no general Unicode case folding.
 
-CLI search returns at most 20 notes, ordered by descending id (newest inserted
-first, not most recently edited). The service/repository API accepts a positive
-`limit`; the CLI has no `--limit` option. List/export use the same id ordering.
+CLI search accepts `--limit N` (default 20; must be positive), ordered by
+descending id (newest inserted first, not most recently edited). Results show
+ID, title, created_at, summary, and tags without the full body; missing
+summary/tags use `(none)`. No results is a successful empty result.
+List/export use the same id ordering.
 `list --tag` is a separate, exact, case-sensitive tag filter.
+
+### Safe deletion
+
+`delete NOTE_ID` reads the note first and prompts with its ID/title; the default
+answer is no. Answering no or pressing Enter preserves the note and exits 0.
+Affirmative confirmation deletes it. EOF/unreadable confirmation preserves
+the note and exits nonzero. Missing IDs fail before any prompt.
+`delete NOTE_ID --yes` explicitly skips confirmation, including in automation.
+Confirmation belongs only to the CLI; service/repository deletion is unchanged.
+Deletion never uses the LLM.
+
+### SQLite backup and recovery
+
+JSON export has no import/restore counterpart in v0.1.0. A separate SQLite
+rehearsal uses `sqlite3.Connection.backup()` with fictional temporary data,
+then verifies a child process can list/show/search the backup and that all
+seven note fields match. Run `python -m pytest tests/test_backup_restore.py -q -s`
+to reproduce it. See the Chinese quickstart for a guarded demonstration-only
+backup procedure; this adds no public backup/import command.
 
 ## Export JSON v1
 

@@ -46,6 +46,7 @@ class FakeNoteRepository:
         self._notes: dict[int, Note] = {}
         self._next_id = 1
         self.calls: list[str] = []
+        self.search_args: list[tuple[str, int]] = []
         self.fail_save_with: Exception | None = None
         self.fail_update_with: Exception | None = None
         self.fail_search_with: Exception | None = None
@@ -94,8 +95,9 @@ class FakeNoteRepository:
             raise self.fail_list_all_with
         return tuple(self._notes[key] for key in sorted(self._notes, reverse=True))
 
-    def search(self, query: str) -> tuple[Note, ...]:
+    def search(self, query: str, limit: int = 20) -> tuple[Note, ...]:
         self.calls.append("search")
+        self.search_args.append((query, limit))
         if self.fail_search_with is not None:
             raise self.fail_search_with
         if not query.strip():
@@ -109,7 +111,7 @@ class FakeNoteRepository:
             or needle in self._notes[key].body.lower()
             # M6 contract: title/body/summary only, tags excluded.
             or needle in (self._notes[key].summary or "").lower()
-        )
+        )[:limit]
 
     def delete(self, note_id: int) -> None:
         self.calls.append("delete")
@@ -482,7 +484,7 @@ class TestDelete:
         repo = _fake()
         stored = repo.save(Note.create("Title", "body", now=NOW))
         typer_app = build_app(llm=FakeLLM([]), repo=repo)
-        result = runner.invoke(typer_app, ["delete", str(stored.id)])
+        result = runner.invoke(typer_app, ["delete", str(stored.id), "--yes"])
         assert result.exit_code == 0, result.output
         assert f"Deleted note {stored.id}" in result.stdout
         assert repo.count() == 0
@@ -494,6 +496,7 @@ class TestDelete:
         result = runner.invoke(typer_app, ["delete", "7"])
         assert result.exit_code != 0
         assert "Note 7 not found" in result.stdout
+        assert "Delete note" not in result.stdout
         assert repo.count() == 0
 
     def test_delete_only_target_keeps_others(self) -> None:
@@ -501,7 +504,7 @@ class TestDelete:
         first = repo.save(Note.create("keep", "b1", now=NOW))
         second = repo.save(Note.create("drop", "b2", now=NOW))
         typer_app = build_app(llm=FakeLLM([]), repo=repo)
-        result = runner.invoke(typer_app, ["delete", str(second.id)])
+        result = runner.invoke(typer_app, ["delete", str(second.id), "--yes"])
         assert result.exit_code == 0, result.output
         assert repo.count() == 1
         assert repo.get(first.id).title == "keep"

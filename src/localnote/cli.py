@@ -249,10 +249,29 @@ def build_app(
         typer.echo(f"Updated note {note.id}: {note.title}")
 
     @typer_app.command()
-    def delete(note_id: Annotated[int, typer.Argument(help="Note id.")]) -> None:
-        """Delete a note by id."""
+    def delete(
+        note_id: Annotated[int, typer.Argument(help="Note id.")],
+        yes: Annotated[
+            bool,
+            typer.Option("--yes", help="Explicitly skip the deletion confirmation."),
+        ] = False,
+    ) -> None:
+        """Delete a note after confirmation (defaults to no); never uses the LLM."""
         try:
-            _service(use_llm=False).delete_note(note_id)
+            service = _service(use_llm=False)
+            note = service.get_note(note_id)
+            if not yes:
+                try:
+                    confirmed = typer.confirm(
+                        f"Delete note {note.id}: {note.title}?", default=False
+                    )
+                except (typer.Abort, OSError, ValueError) as exc:
+                    typer.echo("Deletion cancelled: no confirmation response was available.")
+                    raise typer.Exit(code=1) from exc
+                if not confirmed:
+                    typer.echo("Deletion cancelled.")
+                    return
+            service.delete_note(note_id)
         except NoteNotFoundError as exc:
             typer.echo(str(exc))
             raise typer.Exit(code=1) from exc
@@ -269,10 +288,14 @@ def build_app(
                 help="Literal text to find in titles, bodies, and summaries."
             ),
         ],
+        limit: Annotated[
+            int,
+            typer.Option("--limit", min=1, help="Maximum results; must be greater than zero."),
+        ] = 20,
     ) -> None:
         """Search notes by literal text (newest first; % and _ match literally)."""
         try:
-            notes = _service(use_llm=False).search_notes(query)
+            notes = _service(use_llm=False).search_notes(query, limit=limit)
         except PersistenceError as exc:
             typer.echo(str(exc))
             raise typer.Exit(code=1) from exc
@@ -283,7 +306,12 @@ def build_app(
             typer.echo("No notes found.")
             return
         for note in notes:
-            typer.echo(f"{note.id}\t{note.title}\t{', '.join(note.tags) or '-'}")
+            typer.echo(f"ID: {note.id}")
+            typer.echo(f"Title: {note.title}")
+            typer.echo(f"Created: {note.created_at.isoformat()}")
+            typer.echo(f"Summary: {note.summary or '(none)'}")
+            typer.echo(f"Tags: {', '.join(note.tags) or '(none)'}")
+            typer.echo("")
 
     @typer_app.command()
     def export(

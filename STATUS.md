@@ -2,6 +2,46 @@
 
 Updated: 2026-10-07
 
+## Current first-use delivery verification (2026-10-07)
+
+- Starting state: clean working tree, HEAD `03a8ced`, existing project .venv
+  Python 3.12.10. Baseline was freshly rerun: 191 passed, Ruff PASS, mypy src PASS.
+- Final current gates: `python -m pytest tests/ -q` — **216 passed**;
+  `python -m ruff check src tests` — PASS;
+  `python -m mypy src` — PASS (10 source files).
+- Delete confirmation belongs only to CLI, defaults to no, identifies ID/title,
+  preserves data on cancellation/EOF, and supports explicit `--yes`.
+  Missing IDs fail before prompting; no LLM calls. Existing automatic deletion
+  tests now use `--yes` under the explicitly approved behavior change.
+- Search CLI forwards positive `--limit` (default 20), shows ID/title/created_at/
+  summary/tags with missing-value placeholders, and omits the full body.
+  Existing literal SQL/query stripping/id ordering/field scope are preserved;
+  list, service, and repository behavior are unchanged.
+- Windows PowerShell quickstart flow: **PASS**, including 17 localnote command
+  invocations, actual note IDs 1/2/3, no-LLM CRUD, positive search limit, JSON
+  export, cancellation/yes/--yes deletion, local Ollama summarize and AI add.
+  Model `qwen38-dev-16k:latest` was already installed; no model downloads.
+- SQLite recovery rehearsal: **PASS**. stdlib Connection.backup() from a newly
+  created fictional temporary DB, new backup file, child-process list/show/search,
+  all seven Note fields equal, ID gaps preserved (4/3/1), connections closed.
+  The documented demonstration-only backup procedure was also run successfully.
+  No JSON restore is claimed and no public backup/import command is added.
+- Formal `~/.localnote/localnote.db` was never opened or changed; its default
+  configuration path was only displayed. Demo DBs, JSON, and raw verification
+  outputs remain in ignored dist paths.
+- Rebuilt wheel: **PASS**. A fresh temporary venv installed the wheel without
+  dependencies, reused project .venv dependencies, and verified package origin
+  inside the isolated installation. **21 CLI invocations PASS**: help/version,
+  new delete/search options, no-LLM CRUD, export, invalid limit, empty results,
+  EOF/no/yes/--yes deletion and missing IDs. Temporary installation cleaned.
+- `QUICKSTART.zh-TW.md` provides first-use and next-session PowerShell steps.
+  Existing Ollama was running; the optional `ollama serve` startup branch was
+  not separately exercised. No global Python/PATH/security/policy changes.
+
+**First-use delivery READY.** Remains a single-user personal CLI; no GUI,
+Web, multi-user/accounts, RAG or Import added. Push is explicitly authorized
+by the final instruction in the current request; no tag or Release is created.
+
 ## Milestones
 
 | Milestone | Status | Notes |
@@ -16,7 +56,7 @@ Updated: 2026-10-07
 | M7 — JSON export | **Done** | `export PATH [--force]`, JSON v1, Unicode, aware UTC export time, atomic publication, failure cleanup; no LLM and no import |
 | M8 — Release hardening | **Done** | Resource/error/help audit, final wheel, 30 real CLI smoke invocations, documentation and changelog |
 
-## Final candidate verification (2026-10-07)
+## Previous candidate verification (03a8ced; historical)
 
 - `pytest tests/ -q` — 191 passed
 - `ruff check src tests` — All checks passed
@@ -102,8 +142,8 @@ A future dedicated test-typing cleanup may address these.
   WAL mode or explicit concurrent-writer coordination (single-user CLI scope).
 - Search uses LIKE scans (title index only), not full-text or semantic search.
   ASCII matching is case-insensitive; general Unicode case folding is absent.
-- CLI search is limited to 20 hits; configurable positive limits are available
-  through the service/repository APIs only.
+- CLI search defaults to 20 hits; `--limit N` accepts a positive limit and
+  delegates to the existing service/repository implementation.
 - JSON export without force requires hard-link support on the destination
   filesystem; failures are reported without falling back to unsafe overwrite.
 - Export loads all notes into memory; atomic publication is not a general
